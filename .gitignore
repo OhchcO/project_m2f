@@ -1,0 +1,35 @@
+# 数据目录
+temp_data/
+
+# Windows Zone.Identifier 元数据
+*:Zone.Identifier
+
+# Python 编译缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 模型权重文件
+*.pth
+*.pkl
+
+# 构建产物
+build/
+*.egg-info/
+dist/
+
+# 输出目录
+eval_output/
+inference_output/
+results/
+eval_balanced_output/
+output/
+
+# 编辑器临时文件
+*.swp
+*.swo
+*~
+
+# IDE 配置
+.idea/
+.vscode/
