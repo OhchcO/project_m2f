@@ -26,10 +26,14 @@ if str(CURRENT_DIR) not in sys.path:
 from multiview_runner import (  # noqa: E402
     DEFAULT_CONFIG,
     DEFAULT_M2F_ROOT,
+    DEFAULT_SINGLEVIEW_CONFIG,
+    DEFAULT_SINGLEVIEW_WEIGHTS,
+    DEFAULT_VIDEO_CONFIG,
     DEFAULT_WEIGHTS,
     load_step_faces,
     mesh_to_payload,
     run_detectron2_multiview,
+    run_detectron2_singleview,
     summarize_labels,
 )
 
@@ -167,6 +171,19 @@ class Handler(BaseHTTPRequestHandler):
                     "m2f_root": DEFAULT_M2F_ROOT,
                     "config_path": DEFAULT_CONFIG,
                     "weights_path": DEFAULT_WEIGHTS,
+                    "mode": "multiview",
+                    "modes": {
+                        "multiview": {
+                            "label": "视频多视角",
+                            "config_path": DEFAULT_VIDEO_CONFIG,
+                            "weights_path": DEFAULT_WEIGHTS,
+                        },
+                        "singleview": {
+                            "label": "单图投票",
+                            "config_path": DEFAULT_SINGLEVIEW_CONFIG,
+                            "weights_path": DEFAULT_SINGLEVIEW_WEIGHTS,
+                        },
+                    },
                     "device": "cuda",
                     "score_threshold": 0.5,
                     "min_ratio": 0.5,
@@ -261,7 +278,10 @@ class Handler(BaseHTTPRequestHandler):
             job["output_dir"] = output_dir
             job["log_path"] = os.path.join(output_dir, "run.log")
             append_log(job, f"日志文件: {job['log_path']}")
-            result = run_detectron2_multiview(
+            mode = payload.get("mode") or "multiview"
+            append_log(job, f"推理模式: {mode}")
+            runner = run_detectron2_singleview if mode == "singleview" else run_detectron2_multiview
+            result = runner(
                 job["step_data"],
                 os.path.abspath(os.path.expanduser(payload["m2f_root"])),
                 os.path.abspath(os.path.expanduser(payload["config_path"])),

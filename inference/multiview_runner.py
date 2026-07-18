@@ -25,14 +25,30 @@ from inference.postprocess import extract_faces_from_encoded_image, postprocess_
 
 
 DEFAULT_M2F_ROOT = "/data/m2f/Mask2Former"
-DEFAULT_CONFIG = os.path.join(
+DEFAULT_VIDEO_CONFIG = os.path.join(
     DEFAULT_M2F_ROOT, "configs", "mfr_multiview", "video_maskformer2_R50_bs1_14view.yaml"
 )
-DEFAULT_WEIGHT_CANDIDATES = [
+DEFAULT_CONFIG = DEFAULT_VIDEO_CONFIG
+DEFAULT_SINGLEVIEW_CONFIG = os.path.join(
+    DEFAULT_M2F_ROOT, "configs", "mfr_singleview", "maskformer2_R50_512.yaml"
+)
+DEFAULT_VIDEO_WEIGHT_CANDIDATES = [
     "/data/m2f/temp_data/mfr_multiview_server_bs1_512_train2k_output/model_final.pth",
     "/data/m2f/result/mfr_multiview_server_bs1_512_output/model_final.pth",
+    "/hy-tmp/mfr_multiview_MFRInstSegM2F_2100_bs1_512_ep50_output/model_final.pth",
 ]
-DEFAULT_WEIGHTS = next((path for path in DEFAULT_WEIGHT_CANDIDATES if os.path.exists(path)), DEFAULT_WEIGHT_CANDIDATES[0])
+DEFAULT_SINGLEVIEW_WEIGHT_CANDIDATES = [
+    "/hy-tmp/mfr_singleview_MFRInstSegM2F_2100_bs1_512_ep50_output/model_final.pth",
+    "/mnt/e/wsl/result/MFRInstSegM2F_2100_singleview_512_output/model_final.pth",
+]
+DEFAULT_WEIGHTS = next(
+    (path for path in DEFAULT_VIDEO_WEIGHT_CANDIDATES if os.path.exists(path)),
+    DEFAULT_VIDEO_WEIGHT_CANDIDATES[0],
+)
+DEFAULT_SINGLEVIEW_WEIGHTS = next(
+    (path for path in DEFAULT_SINGLEVIEW_WEIGHT_CANDIDATES if os.path.exists(path)),
+    DEFAULT_SINGLEVIEW_WEIGHT_CANDIDATES[0],
+)
 _PREDICTOR_CACHE = {}
 _PREDICTOR_CACHE_LOCK = threading.Lock()
 
@@ -157,6 +173,41 @@ def load_video_predictor(m2f_root, config_path, weights_path, device):
     return predictor, False
 
 
+def load_singleview_predictor(m2f_root, config_path, weights_path, device):
+    root = os.path.abspath(m2f_root)
+    config_path = os.path.abspath(config_path)
+    weights_path = os.path.abspath(weights_path)
+    cache_key = ("singleview", root, config_path, weights_path, device)
+    with _PREDICTOR_CACHE_LOCK:
+        cached = _PREDICTOR_CACHE.get(cache_key)
+        if cached is not None:
+            return cached, True
+
+    if root not in sys.path:
+        sys.path.insert(0, root)
+
+    from detectron2.config import get_cfg
+    from detectron2.engine import DefaultPredictor
+    from detectron2.projects.deeplab import add_deeplab_config
+    from mask2former import add_maskformer2_config
+
+    cfg = get_cfg()
+    add_deeplab_config(cfg)
+    add_maskformer2_config(cfg)
+    cfg.merge_from_file(config_path)
+    cfg.defrost()
+    cfg.MODEL.WEIGHTS = weights_path
+    cfg.MODEL.DEVICE = device
+    cfg.MODEL.MASK_FORMER.TEST.INSTANCE_ON = True
+    cfg.MODEL.MASK_FORMER.TEST.SEMANTIC_ON = False
+    cfg.MODEL.MASK_FORMER.TEST.PANOPTIC_ON = False
+    cfg.freeze()
+    predictor = DefaultPredictor(cfg)
+    with _PREDICTOR_CACHE_LOCK:
+        _PREDICTOR_CACHE[cache_key] = predictor
+    return predictor, False
+
+
 def masks_to_segmentation(frame_masks, scores, labels, threshold, height, width):
     segmentation = np.zeros((height, width), dtype=np.int32)
     segments_info = []
@@ -184,6 +235,30 @@ def colorize_segments(segmentation, segments_info):
     for segment_id, label_id in label_by_segment.items():
         colored[segmentation == segment_id] = class_color(label_id)
     return colored
+
+
+def instances_to_segmentation(outputs, threshold, height, width):
+    instances = outputs["instances"].to("cpu")
+    if len(instances) == 0:
+        return np.zeros((height, width), dtype=np.int32), []
+
+    order = sorted(range(len(instances)), key=lambda idx: float(instances.scores[idx]), reverse=True)
+    segmentation = np.zeros((height, width), dtype=np.int32)
+    segments_info = []
+    instance_id = 1
+    for index in order:
+        score = float(instances.scores[index])
+        if score < threshold:
+            continue
+        mask = instances.pred_masks[index].numpy().astype(bool)
+        if mask.shape != segmentation.shape:
+            mask = cv2.resize(mask.astype(np.uint8), (width, height), interpolation=cv2.INTER_NEAREST).astype(bool)
+        segmentation[mask] = instance_id
+        segments_info.append(
+            {"id": instance_id, "label_id": int(instances.pred_classes[index]), "score": score}
+        )
+        instance_id += 1
+    return segmentation, segments_info
 
 
 def build_view_face_labels(step_data, class_map):
@@ -325,6 +400,102 @@ def run_detectron2_multiview(
     }
     if progress:
         progress(f"多视角推理总用时 {_elapsed(total_start)}")
+    return result
+
+
+def run_detectron2_singleview(
+    step_data,
+    m2f_root,
+    config_path,
+    weights_path,
+    output_dir,
+    device,
+    score_threshold,
+    min_ratio,
+    min_face_area,
+    progress=None,
+):
+    total_start = time.perf_counter()
+    directions = get_cube_14_view_directions()
+    render_start = time.perf_counter()
+    encoded_dir, image_paths, mapping_path = render_encoded_views(step_data, output_dir, directions, progress)
+    gb_to_fid = build_reverse_gb_map(mapping_path)
+    if progress:
+        progress(f"14 视角渲染完成，用时 {_elapsed(render_start)}")
+
+    if progress:
+        progress("加载 Detectron2 单图 Mask2Former 权重")
+    load_start = time.perf_counter()
+    predictor, cache_hit = load_singleview_predictor(m2f_root, config_path, weights_path, device)
+    if progress:
+        progress(f"模型{'缓存命中' if cache_hit else '加载完成'}，用时 {_elapsed(load_start)}")
+
+    frames = [cv2.imread(path, cv2.IMREAD_COLOR) for path in image_paths]
+    if any(frame is None for frame in frames):
+        raise RuntimeError("编码视图读取失败")
+
+    height, width = frames[0].shape[:2]
+    face_predictions = {face["face_id"]: [] for face in step_data["faces"]}
+    result_dir = os.path.join(output_dir, "frame_results")
+    os.makedirs(result_dir, exist_ok=True)
+    raw_prediction_summary = []
+
+    infer_start = time.perf_counter()
+    for frame_index, (image_path, frame) in enumerate(zip(image_paths, frames)):
+        if progress:
+            progress(f"单图推理第 {frame_index + 1}/{len(frames)} 个视角")
+        outputs = predictor(frame)
+        segmentation, segments_info = instances_to_segmentation(outputs, score_threshold, height, width)
+        raw_prediction_summary.append(
+            {
+                "frame": frame_index + 1,
+                "num_instances": len(segments_info),
+                "labels": [int(item["label_id"]) for item in segments_info],
+                "scores": [float(item["score"]) for item in segments_info],
+            }
+        )
+
+        encoded_rgb = np.array(Image.open(image_path).convert("RGB"))
+        face_masks = extract_faces_from_encoded_image(encoded_rgb, min_area=min_face_area, gb_to_fid=gb_to_fid)
+        _, _, class_map = postprocess_with_encoded_faces(segmentation, segments_info, face_masks, min_ratio=min_ratio)
+        view_dir = os.path.join(result_dir, f"{frame_index + 1:06d}")
+        os.makedirs(view_dir, exist_ok=True)
+        np.save(os.path.join(view_dir, "segmentation.npy"), segmentation)
+        Image.fromarray(colorize_segments(segmentation, segments_info)).save(
+            os.path.join(view_dir, "prediction_color.png")
+        )
+        with open(os.path.join(view_dir, "segments_info.json"), "w", encoding="utf-8") as file:
+            json.dump(segments_info, file, ensure_ascii=False, indent=2)
+        with open(os.path.join(view_dir, "class_map.json"), "w", encoding="utf-8") as file:
+            json.dump(class_map, file, ensure_ascii=False, indent=2)
+        with open(os.path.join(view_dir, "view_face_labels.json"), "w", encoding="utf-8") as file:
+            json.dump(build_view_face_labels(step_data, class_map), file, ensure_ascii=False, indent=2)
+        for info in class_map.values():
+            face_id = int(info["face_id"])
+            face_predictions.setdefault(face_id, []).append((int(info["class_id"]), float(info["score"])))
+
+    if progress:
+        progress(f"14 视角单图推理与回投完成，用时 {_elapsed(infer_start)}")
+
+    face_labels = build_face_labels(step_data, face_predictions)
+    label_path = os.path.join(output_dir, "face_labels.json")
+    with open(label_path, "w", encoding="utf-8") as file:
+        json.dump(face_labels, file, ensure_ascii=False, indent=2)
+
+    result = {
+        "output_dir": output_dir,
+        "encoded_dir": encoded_dir,
+        "mapping_path": mapping_path,
+        "label_path": label_path,
+        "face_labels": face_labels,
+        "raw_predictions": {
+            "mode": "singleview",
+            "frames": raw_prediction_summary,
+            "num_instances": sum(item["num_instances"] for item in raw_prediction_summary),
+        },
+    }
+    if progress:
+        progress(f"单图投票推理总用时 {_elapsed(total_start)}")
     return result
 
 

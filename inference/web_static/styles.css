@@ -102,6 +102,30 @@ input {
   gap: 0 10px;
 }
 
+.mode-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #eef3f5;
+}
+
+.mode-btn {
+  background: transparent;
+  color: var(--muted);
+}
+
+.mode-btn:hover {
+  background: rgba(23, 107, 135, 0.12);
+}
+
+.mode-btn.active {
+  background: var(--accent);
+  color: white;
+}
+
 button {
   height: 34px;
   border: 0;

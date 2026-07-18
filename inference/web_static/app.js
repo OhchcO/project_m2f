@@ -11,6 +11,8 @@ const state = {
   dragMode: "rotate",
   lastPointer: [0, 0],
   meshVersion: 0,
+  mode: "multiview",
+  defaults: null,
 };
 
 const els = {
@@ -25,6 +27,8 @@ const els = {
   stepFile: $("stepFile"),
   runBtn: $("runBtn"),
   resetBtn: $("resetViewBtn"),
+  multiviewModeBtn: $("multiviewModeBtn"),
+  singleviewModeBtn: $("singleviewModeBtn"),
 };
 
 async function api(path, options = {}) {
@@ -42,13 +46,28 @@ function setStatus(text) {
 }
 
 function fillDefaults(defaults) {
-  $("weightsPath").value = defaults.weights_path;
-  $("configPath").value = defaults.config_path;
+  state.defaults = defaults;
+  state.mode = defaults.mode || "multiview";
+  applyModeDefaults(state.mode);
   $("m2fRoot").value = defaults.m2f_root;
   $("device").value = defaults.device;
   $("scoreThreshold").value = defaults.score_threshold;
   $("minRatio").value = defaults.min_ratio;
   $("minFaceArea").value = defaults.min_face_area;
+}
+
+function setMode(mode) {
+  state.mode = mode;
+  applyModeDefaults(mode);
+}
+
+function applyModeDefaults(mode) {
+  const modes = (state.defaults && state.defaults.modes) || {};
+  const item = modes[mode] || {};
+  $("weightsPath").value = item.weights_path || (state.defaults && state.defaults.weights_path) || "";
+  $("configPath").value = item.config_path || (state.defaults && state.defaults.config_path) || "";
+  els.multiviewModeBtn.classList.toggle("active", mode === "multiview");
+  els.singleviewModeBtn.classList.toggle("active", mode === "singleview");
 }
 
 function rgb(color) {
@@ -97,6 +116,7 @@ async function refreshMeshIfNeeded(job) {
 function collectRunPayload() {
   return {
     job_id: state.jobId,
+    mode: state.mode,
     weights_path: $("weightsPath").value.trim(),
     config_path: $("configPath").value.trim(),
     m2f_root: $("m2fRoot").value.trim(),
@@ -107,6 +127,9 @@ function collectRunPayload() {
     min_face_area: Number($("minFaceArea").value),
   };
 }
+
+els.multiviewModeBtn.addEventListener("click", () => setMode("multiview"));
+els.singleviewModeBtn.addEventListener("click", () => setMode("singleview"));
 
 function onStepLoaded(data) {
   state.jobId = data.job.id;
