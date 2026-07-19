@@ -40,6 +40,7 @@ from multiview_runner import (  # noqa: E402
 
 STATE = {"jobs": {}, "lock": threading.Lock()}
 UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "m2f_step_uploads")
+DEFAULT_OUTPUT_ROOT = os.getenv("M2F_WEB_OUTPUT_ROOT", "/mnt/e/wsl/result")
 
 
 def load_step_job(step_path):
@@ -78,7 +79,7 @@ def _json_default(value):
 
 def make_job(step_path):
     job_id = uuid.uuid4().hex[:12]
-    output_dir = os.path.join(tempfile.gettempdir(), f"m2f_web_{job_id}")
+    output_dir = os.path.join(DEFAULT_OUTPUT_ROOT, f"m2f_web_{job_id}")
     os.makedirs(output_dir, exist_ok=True)
     job = {
         "id": job_id,

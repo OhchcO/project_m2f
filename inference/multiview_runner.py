@@ -15,6 +15,7 @@ from collections import Counter, defaultdict
 import cv2
 import numpy as np
 import pyvista as pv
+import torch
 from PIL import Image
 
 from inference_config import OUTPUT_HEIGHT, OUTPUT_WIDTH, TYPE_R_BASE, class_color, class_name
@@ -33,11 +34,13 @@ DEFAULT_SINGLEVIEW_CONFIG = os.path.join(
     DEFAULT_M2F_ROOT, "configs", "mfr_singleview", "maskformer2_R50_512.yaml"
 )
 DEFAULT_VIDEO_WEIGHT_CANDIDATES = [
+    "/mnt/e/wsl/result/MFRInstSegM2F_2100_mul/model_0089999.pth",
     "/data/m2f/temp_data/mfr_multiview_server_bs1_512_train2k_output/model_final.pth",
     "/data/m2f/result/mfr_multiview_server_bs1_512_output/model_final.pth",
     "/hy-tmp/mfr_multiview_MFRInstSegM2F_2100_bs1_512_ep50_output/model_final.pth",
 ]
 DEFAULT_SINGLEVIEW_WEIGHT_CANDIDATES = [
+    "/mnt/e/wsl/result/MFRInstSegM2F_2100_single/model_final.pth",
     "/hy-tmp/mfr_singleview_MFRInstSegM2F_2100_bs1_512_ep50_output/model_final.pth",
     "/mnt/e/wsl/result/MFRInstSegM2F_2100_singleview_512_output/model_final.pth",
 ]
@@ -261,6 +264,43 @@ def instances_to_segmentation(outputs, threshold, height, width):
     return segmentation, segments_info
 
 
+def predict_singleview_batch(predictor, frames, batch_size=14, progress=None):
+    outputs = []
+    total = len(frames)
+    index = 0
+    batch_size = max(1, int(batch_size))
+
+    while index < total:
+        current_batch = min(batch_size, total - index)
+        try:
+            if progress:
+                progress(f"单图批量推理 {index + 1}-{index + current_batch}/{total}")
+            batch_frames = frames[index : index + current_batch]
+            batched_inputs = []
+            with torch.no_grad():
+                for original_image in batch_frames:
+                    image = original_image
+                    if predictor.input_format == "RGB":
+                        image = image[:, :, ::-1]
+                    height, width = image.shape[:2]
+                    image = predictor.aug.get_transform(image).apply_image(image)
+                    image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
+                    batched_inputs.append({"image": image, "height": height, "width": width})
+                outputs.extend(predictor.model(batched_inputs))
+            index += current_batch
+        except RuntimeError as exc:
+            is_cuda_oom = "CUDA out of memory" in str(exc)
+            if not is_cuda_oom or current_batch == 1:
+                raise
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            batch_size = max(1, current_batch // 2)
+            if progress:
+                progress(f"显存不足，单图 batch 降为 {batch_size} 后继续")
+
+    return outputs
+
+
 def build_view_face_labels(step_data, class_map):
     face_labels = {
         face["face_id"]: {"class_id": -1, "class_name": "background", "score": 0.0, "votes": 0}
@@ -329,9 +369,12 @@ def run_detectron2_multiview(
     if progress:
         progress(f"模型{'缓存命中' if cache_hit else '加载完成'}，用时 {_elapsed(load_start)}")
 
+    read_start = time.perf_counter()
     frames = [cv2.imread(path, cv2.IMREAD_COLOR) for path in image_paths]
     if any(frame is None for frame in frames):
         raise RuntimeError("编码视图读取失败")
+    if progress:
+        progress(f"14 视角图片读取完成，用时 {_elapsed(read_start)}")
 
     if progress:
         progress("运行 14 视角视频推理")
@@ -430,9 +473,12 @@ def run_detectron2_singleview(
     if progress:
         progress(f"模型{'缓存命中' if cache_hit else '加载完成'}，用时 {_elapsed(load_start)}")
 
+    read_start = time.perf_counter()
     frames = [cv2.imread(path, cv2.IMREAD_COLOR) for path in image_paths]
     if any(frame is None for frame in frames):
         raise RuntimeError("编码视图读取失败")
+    if progress:
+        progress(f"14 视角图片读取完成，用时 {_elapsed(read_start)}")
 
     height, width = frames[0].shape[:2]
     face_predictions = {face["face_id"]: [] for face in step_data["faces"]}
@@ -440,11 +486,21 @@ def run_detectron2_singleview(
     os.makedirs(result_dir, exist_ok=True)
     raw_prediction_summary = []
 
+    singleview_batch_size = int(os.getenv("M2F_SINGLEVIEW_BATCH_SIZE", "14"))
     infer_start = time.perf_counter()
-    for frame_index, (image_path, frame) in enumerate(zip(image_paths, frames)):
+    outputs_per_frame = predict_singleview_batch(
+        predictor,
+        frames,
+        batch_size=singleview_batch_size,
+        progress=progress,
+    )
+    if progress:
+        progress(f"单图批量模型前向完成，batch={singleview_batch_size}，用时 {_elapsed(infer_start)}")
+
+    project_start = time.perf_counter()
+    for frame_index, (image_path, outputs) in enumerate(zip(image_paths, outputs_per_frame)):
         if progress:
-            progress(f"单图推理第 {frame_index + 1}/{len(frames)} 个视角")
-        outputs = predictor(frame)
+            progress(f"回投单图结果第 {frame_index + 1}/{len(frames)} 个视角")
         segmentation, segments_info = instances_to_segmentation(outputs, score_threshold, height, width)
         raw_prediction_summary.append(
             {
@@ -475,7 +531,7 @@ def run_detectron2_singleview(
             face_predictions.setdefault(face_id, []).append((int(info["class_id"]), float(info["score"])))
 
     if progress:
-        progress(f"14 视角单图推理与回投完成，用时 {_elapsed(infer_start)}")
+        progress(f"14 视角单图回投与结果保存完成，用时 {_elapsed(project_start)}")
 
     face_labels = build_face_labels(step_data, face_predictions)
     label_path = os.path.join(output_dir, "face_labels.json")

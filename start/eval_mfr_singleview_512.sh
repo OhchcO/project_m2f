@@ -12,15 +12,21 @@ set -euo pipefail
 #   GPU_ID 或 CUDA_VISIBLE_DEVICES: 默认使用 0 号 GPU
 #   --score_threshold: 预测实例分数阈值，当前 0.3
 #   --min_size_test: 验证输入短边尺寸，当前 512
+#   --fusion_mode score_weighted_view_vote:
+#       单图模型先跑 14 张图，每个视角给可见面投一个类别，按预测置信度加权累计，再算整模型面级指标
+#   --fusion_mode view_vote: 
+#       单图模型先跑 14 张图，每个视角给可见面投一个类别，再算整模型面级指标
+#   --fusion_mode pixel_vote: 
+#       单图模型先跑 14 张图，每个像素给可见面投一个类别，再算整模型像素级指标（三选一）
 #   --eval_class_mode both: 同时输出 24 细类和粗类指标
 
 CONDA_ENV="${CONDA_ENV:-m2f}"
 PROJECT_DIR="${PROJECT_DIR:-/data/m2f}"
 MASK2FORMER_DIR="${MASK2FORMER_DIR:-${PROJECT_DIR}/Mask2Former}"
-DATASET_DIR="${DATASET_DIR:-/mnt/e/wsl/datasets/SimpleM2F_200}"
-RESULT_DIR="${RESULT_DIR:-/mnt/e/wsl/result/SimpleM2F_200_single}"
+DATASET_DIR="${DATASET_DIR:-/mnt/e/wsl/datasets/MFRInstSegM2F_2100}"
+RESULT_DIR="${RESULT_DIR:-/mnt/e/wsl/result/MFRInstSegM2F_2100_single}"
 WEIGHTS="${WEIGHTS:-${RESULT_DIR}/model_final.pth}"
-OUTPUT_DIR="${OUTPUT_DIR:-/mnt/e/wsl/result/eval_SimpleM2F_200_single_model_final}"
+OUTPUT_DIR="${OUTPUT_DIR:-/mnt/e/wsl/result/eval_MFRInstSegM2F_2100_single_model_final}"
 
 if [ ! -s "${WEIGHTS}" ]; then
   echo "[ERROR] Trained weights not found: ${WEIGHTS}"
@@ -46,4 +52,5 @@ python "${PROJECT_DIR}/new_add/eval_mfr_singleview.py" \
   --output_dir "${OUTPUT_DIR}" \
   --score_threshold 0.3 \
   --min_size_test 512 \
+  --fusion_mode score_weighted_view_vote \
   --eval_class_mode both

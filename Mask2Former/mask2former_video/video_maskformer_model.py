@@ -264,7 +264,7 @@ class VideoMaskFormer(nn.Module):
             scores_per_image, topk_indices = scores.flatten(0, 1).topk(topk, sorted=False)
             labels_per_image = labels[topk_indices]
             topk_indices = topk_indices // self.sem_seg_head.num_classes
-            pred_masks = pred_masks[topk_indices]
+            pred_masks = pred_masks[topk_indices.to(pred_masks.device)]
 
             pred_masks = pred_masks[:, :, : img_size[0], : img_size[1]]
             pred_masks = F.interpolate(

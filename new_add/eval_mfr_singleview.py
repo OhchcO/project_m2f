@@ -8,8 +8,8 @@ The dataset format is the same as the multi-view/video route:
 
 For each CAD model, this script runs the 14 views independently with a
 single-image Mask2Former checkpoint, projects predicted masks back to face ids,
-votes per face across views, and reports the same face-level metrics as the
-multi-view evaluator.
+fuses the 14 views per face, and reports the same model-level face metrics as
+the multi-view evaluator.
 """
 
 import argparse
@@ -87,7 +87,7 @@ def read_singleview_inputs(model_record, val_dir):
     return frames, face_id_maps
 
 
-def project_singleview_predictions_to_faces(outputs_per_view, face_id_maps, score_threshold, mask_threshold):
+def project_singleview_predictions_to_faces(outputs_per_view, face_id_maps, score_threshold, mask_threshold, fusion_mode):
     face_label_votes = defaultdict(Counter)
     face_label_scores = defaultdict(float)
     face_label_sets = defaultdict(set)
@@ -107,6 +107,9 @@ def project_singleview_predictions_to_faces(outputs_per_view, face_id_maps, scor
             }
         )
 
+        view_face_label_pixels = defaultdict(Counter)
+        view_face_label_scores = defaultdict(float)
+        view_face_label_sets = defaultdict(set)
         for score, label, pred_mask in zip(scores, labels, masks):
             score = float(score)
             if score < score_threshold:
@@ -130,9 +133,23 @@ def project_singleview_predictions_to_faces(outputs_per_view, face_id_maps, scor
             for face_id, count in zip(unique_face_ids, counts):
                 face_id = int(face_id)
                 key = (face_id, label)
-                face_label_votes[face_id][label] += int(count)
-                face_label_scores[key] = max(face_label_scores[key], score)
-                face_label_sets[key].update(instance_face_set)
+                if fusion_mode == "pixel_vote":
+                    face_label_votes[face_id][label] += int(count)
+                    face_label_scores[key] = max(face_label_scores[key], score)
+                    face_label_sets[key].update(instance_face_set)
+                else:
+                    view_face_label_pixels[face_id][label] += int(count)
+                    view_face_label_scores[key] = max(view_face_label_scores[key], score)
+                    view_face_label_sets[key].update(instance_face_set)
+
+        if fusion_mode in ("view_vote", "score_weighted_view_vote"):
+            for face_id, label_pixels in view_face_label_pixels.items():
+                label, _ = label_pixels.most_common(1)[0]
+                key = (face_id, label)
+                vote_weight = view_face_label_scores.get(key, 0.0) if fusion_mode == "score_weighted_view_vote" else 1
+                face_label_votes[face_id][label] += vote_weight
+                face_label_scores[key] = max(face_label_scores[key], view_face_label_scores.get(key, 0.0))
+                face_label_sets[key].update(view_face_label_sets.get(key, set()))
 
     face_predictions = {}
     for face_id, votes in face_label_votes.items():
@@ -229,6 +246,16 @@ def parse_args():
     parser.add_argument("--score_threshold", type=float, default=0.3)
     parser.add_argument("--mask_threshold", type=float, default=0.0)
     parser.add_argument("--min_size_test", type=int, default=512)
+    parser.add_argument(
+        "--fusion_mode",
+        choices=["score_weighted_view_vote", "view_vote", "pixel_vote"],
+        default="score_weighted_view_vote",
+        help=(
+            "score_weighted_view_vote: each visible view votes one class weighted by confidence; "
+            "view_vote: each visible view gives one class vote per face; "
+            "pixel_vote: sum class pixels over all views."
+        ),
+    )
     parser.add_argument("--eval_class_mode", choices=["fine", "coarse", "both"], default="both")
     parser.add_argument("--max_models", type=int, default=None)
     return parser.parse_args()
@@ -254,6 +281,7 @@ def main():
             face_id_maps,
             args.score_threshold,
             args.mask_threshold,
+            args.fusion_mode,
         )
         save_prediction_summary(args.output_dir, model_record, view_summaries, face_predictions)
         all_results.extend(evaluate_model(model_record, face_predictions, face_id_maps))
